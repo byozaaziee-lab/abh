@@ -12,7 +12,7 @@ from functools import wraps
 # ==================== KONFIGURASI ====================
 API_ID = 32170185
 API_HASH = "27fdeb3b05889ef614903a87cada5e72"
-BOT_TOKEN = "8744503418:AAFOA4yaXoUdQuh3yK-LOtCeT-SBRuZnn2o"
+BOT_TOKEN = "8573079275:AAFW4xI2BwmjuSm_kdzGHWVjAWqMiPj5HBM"
 
 OWNER_ID = 1692704728
 ALLOWED_USERS = {OWNER_ID}
