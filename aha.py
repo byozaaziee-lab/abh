@@ -13,7 +13,7 @@ API_HASH = "27fdeb3b05889ef614903a87cada5e72"
 BOT_TOKEN = "8560895118:AAFiKsLWZ-mxok1Nw6SaiRfJZqa6W1fnUr8"
 
 # OWNER CONFIG
-OWNER_ID = 5161011537
+OWNER_ID = 1692704728
 ALLOWED_USERS = {OWNER_ID}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
