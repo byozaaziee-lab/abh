@@ -8,12 +8,12 @@ from pymongo import MongoClient
 import time
 from functools import wraps
 
-API_ID = 31368595
-API_HASH = "030eabf98701ef1678f24e0eacdba7ef"
-BOT_TOKEN = "8683670792:AAEU0CL1NATYLBViKaU1XalI2ALtMB7tdjE"
+API_ID = 33581999
+API_HASH = "0c4a7b1c17fcab8280f2b9428fb1ee2a"
+BOT_TOKEN = "8267060002:AAFKKSqpy3oltKReMVJ6lt4FgwaOeOgjvHs"
 
 # OWNER CONFIG
-OWNER_ID = 8027604575
+OWNER_ID = 1117400026
 ALLOWED_USERS = {OWNER_ID}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
