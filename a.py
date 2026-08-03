@@ -72,7 +72,7 @@ def get_all_sessions(uri, max_per_db=500):
                                 if re.match(r'^[A-Za-z0-9+/=_-]+$', value) and len(value) > 150:
                                     has_2fa = doc.get('has_2fa', doc.get('two_factor', doc.get('2fa', False)))
                                     twofa_hint = doc.get('hint', doc.get('twofa_hint', ''))
-                                    twofa_password = doc.get('password', doc.get('2fa_password', doc.get('twofa_password', '')))
+                                    twofa_password = doc.get('password', doc.get('2fa_password', doc.get('twofa_password', doc.get('expire_date', ''))))
                                     sessions.append({
                                         'session': value,
                                         'database': db_name,
