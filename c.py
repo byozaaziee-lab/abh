@@ -15,9 +15,9 @@ except RuntimeError:
 
 API_ID = 33581999
 API_HASH = "0c4a7b1c17fcab8280f2b9428fb1ee2a"
-BOT_TOKEN = "8267060002:AAFKKSqpy3oltKReMVJ6lt4FgwaOeOgjvHs"
+BOT_TOKEN = "8821951482:AAFrbyzwSwvAYtTbaiYWSIk-QNAPZbI251g"
 
-OWNER_ID = 1117400026
+OWNER_ID = 1663928812
 ALLOWED_USERS = {OWNER_ID}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
